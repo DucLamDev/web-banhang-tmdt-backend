@@ -32,7 +32,11 @@ router.get('/', async (req, res) => {
       if (maxPrice) query['variants.price'].$lte = Number(maxPrice);
     }
     if (search) {
-      query.$text = { $search: search };
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { brand: { $regex: search, $options: 'i' } },
+        { shortDescription: { $regex: search, $options: 'i' } },
+      ];
     }
 
     let sortOption = { createdAt: -1 };
