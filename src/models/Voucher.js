@@ -12,6 +12,15 @@ const voucherSchema = new mongoose.Schema({
   startDate: Date,
   endDate: Date,
   isActive: { type: Boolean, default: true },
+  displayLocation: {
+    type: String,
+    enum: ['all', 'product_detail'],
+    default: 'all'
+  },
+  targetCategorySlug: {
+    type: String,
+    default: ''
+  },
   applicableCategories: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
   applicableProducts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product' }]
 }, { timestamps: true });

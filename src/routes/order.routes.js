@@ -2,6 +2,7 @@ import express from 'express';
 import Order from '../models/Order.js';
 import Cart from '../models/Cart.js';
 import Product from '../models/Product.js';
+import Voucher from '../models/Voucher.js';
 import { protect, adminOnly } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -9,7 +10,7 @@ const router = express.Router();
 // Create order
 router.post('/', protect, async (req, res) => {
   try {
-    const { shippingAddress, paymentMethod, note, items: requestItems } = req.body;
+    const { shippingAddress, paymentMethod, note, items: requestItems, voucherCode } = req.body;
 
     const cart = await Cart.findOne({ user: req.user._id }).populate('items.product');
     let orderItems = [];
@@ -71,6 +72,57 @@ router.post('/', protect, async (req, res) => {
       }
     } else {
       return res.status(400).json({ message: 'Giỏ hàng trống' });
+    }
+
+    if (voucherCode && (!voucher || voucher.code !== voucherCode.toUpperCase())) {
+      const matchedVoucher = await Voucher.findOne({
+        code: voucherCode.toUpperCase(),
+        isActive: true,
+        $and: [
+          {
+            $or: [
+              { startDate: { $exists: false } },
+              { startDate: null },
+              { startDate: { $lte: new Date() } },
+            ],
+          },
+          {
+            $or: [
+              { endDate: { $exists: false } },
+              { endDate: null },
+              { endDate: { $gte: new Date() } },
+            ],
+          },
+        ],
+      });
+
+      if (!matchedVoucher) {
+        return res.status(400).json({ message: 'Mã giảm giá không hợp lệ' });
+      }
+
+      if (matchedVoucher.usageLimit && matchedVoucher.usedCount >= matchedVoucher.usageLimit) {
+        return res.status(400).json({ message: 'Mã giảm giá đã hết lượt sử dụng' });
+      }
+
+      if (subtotal < matchedVoucher.minOrderValue) {
+        return res.status(400).json({ message: `Đơn hàng tối thiểu ${matchedVoucher.minOrderValue.toLocaleString()}đ` });
+      }
+
+      discount = matchedVoucher.type === 'percent'
+        ? subtotal * (matchedVoucher.value / 100)
+        : matchedVoucher.value;
+
+      if (matchedVoucher.maxDiscount && discount > matchedVoucher.maxDiscount) {
+        discount = matchedVoucher.maxDiscount;
+      }
+
+      voucher = {
+        code: matchedVoucher.code,
+        discount,
+      };
+
+      matchedVoucher.usedCount += 1;
+      await matchedVoucher.save();
     }
 
     const shippingFee = subtotal >= 2000000 ? 0 : 30000;
