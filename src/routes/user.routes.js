@@ -1,9 +1,11 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import User from '../models/User.js';
 import { protect, adminOnly } from '../middleware/auth.js';
 
 const router = express.Router();
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRE || '7d' });
@@ -60,12 +62,20 @@ router.post('/google-login', async (req, res) => {
   try {
     const { credential } = req.body;
     if (!credential) return res.status(400).json({ message: 'Google credential is required' });
+    if (!process.env.GOOGLE_CLIENT_ID) {
+      return res.status(500).json({ message: 'Google login is not configured on the server' });
+    }
 
-    // Decode the JWT credential from Google (header.payload.signature)
-    const parts = credential.split('.');
-    if (parts.length !== 3) return res.status(400).json({ message: 'Invalid Google credential' });
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
 
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    const payload = ticket.getPayload();
+    if (!payload) {
+      return res.status(400).json({ message: 'Invalid Google credential' });
+    }
+
     const { email, name, picture, sub: googleId } = payload;
 
     if (!email) return res.status(400).json({ message: 'Cannot get email from Google' });
@@ -81,10 +91,19 @@ router.post('/google-login', async (req, res) => {
         role: 'user',
       });
     } else {
+      if (!user.isActive) {
+        return res.status(401).json({ message: 'Tài khoản đã bị khóa' });
+      }
+
+      if (name && !user.fullName) {
+        user.fullName = name;
+      }
+
       if (picture && !user.avatar) {
         user.avatar = picture;
-        await user.save();
       }
+
+      await user.save();
     }
 
     user.lastLogin = new Date();
@@ -227,10 +246,24 @@ router.get('/wishlist', protect, async (req, res) => {
 // Admin: Get all users
 router.get('/', protect, adminOnly, async (req, res) => {
   try {
-    const users = await User.find().select('-password');
+    const users = await User.find().select('-password').sort('-createdAt');
     res.json(users);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+});
+
+// Admin: Toggle user active status
+router.put('/:id/toggle-status', protect, adminOnly, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'Người dùng không tồn tại' });
+    if (user.role === 'admin') return res.status(400).json({ message: 'Không thể vô hiệu hóa admin' });
+    user.isActive = !user.isActive;
+    await user.save();
+    res.json({ message: user.isActive ? 'Đã kích hoạt tài khoản' : 'Đã vô hiệu hóa tài khoản', user });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
   }
 });
 

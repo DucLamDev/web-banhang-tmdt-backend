@@ -9,46 +9,96 @@ const router = express.Router();
 // Create order
 router.post('/', protect, async (req, res) => {
   try {
-    const { shippingAddress, paymentMethod, note } = req.body;
-    
+    const { shippingAddress, paymentMethod, note, items: requestItems } = req.body;
+
     const cart = await Cart.findOne({ user: req.user._id }).populate('items.product');
-    if (!cart || cart.items.length === 0) {
-      return res.status(400).json({ message: 'Giỏ hàng trống' });
-    }
+    let orderItems = [];
+    let subtotal = 0;
+    let discount = 0;
+    let voucher;
 
-    const totals = cart.calculateTotal();
-    const shippingFee = totals.subtotal >= 2000000 ? 0 : 30000;
-
-    const order = await Order.create({
-      user: req.user._id,
-      items: cart.items.map(item => ({
+    if (cart && cart.items.length > 0) {
+      const totals = cart.calculateTotal();
+      subtotal = totals.subtotal;
+      discount = totals.discount;
+      voucher = cart.voucher;
+      orderItems = cart.items.map(item => ({
         product: item.product._id,
         name: item.product.name,
         thumbnail: item.product.thumbnail,
         variant: item.variant,
         price: item.price,
         quantity: item.quantity
-      })),
+      }));
+    } else if (Array.isArray(requestItems) && requestItems.length > 0) {
+      const productIds = requestItems.map(item => item.productId);
+      const products = await Product.find({ _id: { $in: productIds }, isActive: true });
+      const productMap = new Map(products.map(product => [product._id.toString(), product]));
+
+      for (const item of requestItems) {
+        const product = productMap.get(item.productId);
+        if (!product) {
+          return res.status(400).json({ message: 'Sản phẩm không tồn tại hoặc đã ngừng kinh doanh' });
+        }
+
+        const matchedVariant = product.variants.find(variant => variant.sku === item.variantSku)
+          || product.variants.find(variant => variant.name === item.variant);
+
+        if (!matchedVariant) {
+          return res.status(400).json({ message: `Biến thể không hợp lệ cho sản phẩm ${product.name}` });
+        }
+
+        const quantity = Number(item.quantity) || 1;
+        if (matchedVariant.stock < quantity) {
+          return res.status(400).json({ message: `Sản phẩm ${product.name} không đủ tồn kho` });
+        }
+
+        orderItems.push({
+          product: product._id,
+          name: product.name,
+          thumbnail: product.thumbnail,
+          variant: {
+            name: matchedVariant.name,
+            color: matchedVariant.color,
+            storage: matchedVariant.storage,
+            sku: matchedVariant.sku,
+          },
+          price: matchedVariant.price,
+          quantity
+        });
+
+        subtotal += matchedVariant.price * quantity;
+      }
+    } else {
+      return res.status(400).json({ message: 'Giỏ hàng trống' });
+    }
+
+    const shippingFee = subtotal >= 2000000 ? 0 : 30000;
+    const total = subtotal - discount + shippingFee;
+
+    const order = await Order.create({
+      user: req.user._id,
+      items: orderItems,
       shippingAddress,
       paymentMethod,
-      subtotal: totals.subtotal,
+      subtotal,
       shippingFee,
-      discount: totals.discount,
-      voucher: cart.voucher,
-      total: totals.total + shippingFee,
+      discount,
+      voucher,
+      total,
       note,
       statusHistory: [{ status: 'pending', note: 'Đơn hàng mới tạo' }]
     });
 
-    // Update product sold count
-    for (const item of cart.items) {
-      await Product.findByIdAndUpdate(item.product._id, { $inc: { totalSold: item.quantity } });
+    for (const item of orderItems) {
+      await Product.findByIdAndUpdate(item.product, { $inc: { totalSold: item.quantity } });
     }
 
-    // Clear cart
-    cart.items = [];
-    cart.voucher = undefined;
-    await cart.save();
+    if (cart) {
+      cart.items = [];
+      cart.voucher = undefined;
+      await cart.save();
+    }
 
     res.status(201).json(order);
   } catch (error) {
